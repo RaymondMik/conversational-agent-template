@@ -150,17 +150,20 @@ example `temperature` on some reasoning models) are dropped silently instead of 
 
 ## Prompt profiles and multishot prompting
 
-A **prompt profile** is a YAML file in `prompts/`. It pairs a system prompt with a list of
-example exchanges. This is multishot (few-shot) prompting: the examples teach the model the
-expected tone, format, and length far more reliably than instructions alone.
+The assistant's personality, rules, and output style are not hard-coded. They live in
+**prompt profiles**: YAML files in `prompts/`, each combining a system prompt with a set of
+example exchanges. You can switch profiles from the UI without restarting, and you can add new
+ones by dropping a file into the directory.
+
+### Anatomy of a profile
 
 ```yaml
 # prompts/support.yaml
-name: Support agent
-system: |
+name: Support agent            # display name (optional, defaults to the file name)
+system: |                      # the system prompt (required)
   You are a support agent for Acme Widgets. Be warm, brief, and always end
-  with a next step the customer can take.
-examples:
+  with a next step the customer can take. Never promise refunds; escalate instead.
+examples:                      # multishot examples (optional)
   - user: My widget won't turn on.
     assistant: |
       Sorry to hear that. Please hold the power button for 10 seconds to reset it.
@@ -169,36 +172,143 @@ examples:
     assistant: Yes, shipping to Canada takes 5 to 7 business days. Want me to check the cost for your postcode?
 ```
 
-### How it is sent to the model
+| Key | Required | Purpose |
+|---|---|---|
+| `name` | no | Label shown in logs. The dropdown uses the file name. |
+| `system` | yes | Instructions sent as the `system` message on every request. |
+| `examples` | no | List of `user` / `assistant` pairs sent as prior turns before the real conversation. |
 
-`PromptProfile.to_messages()` produces:
+### Updating the system prompt
+
+1. Open the profile you want to change, for example `prompts/default.yaml`.
+2. Edit the `system` block. Use a `|` block scalar so line breaks are preserved.
+3. Save the file. The profile is re-read on every message, so the next reply already uses the
+   new prompt. No restart is needed. (Only *adding or removing* profile files requires a
+   restart, because the dropdown is populated at startup.)
+4. To make a different profile the startup default, set `PROMPT_PROFILE=<file-name>` in `.env`.
+
+What belongs in a system prompt:
+
+- **Role and audience.** "You are a billing assistant for small-business owners."
+- **Hard rules.** Things the model must always or never do. Keep them short and unambiguous.
+- **Output format.** Markdown or plain text, length limits, language, whether to use lists.
+- **Tone.** Formal, playful, terse. One or two adjectives is enough.
+- **Scope.** What to do when the request is out of scope: decline, redirect, ask a question.
+
+Instructions alone describe the behaviour you want. Examples *demonstrate* it, which is where
+multishot prompting comes in.
+
+### What is multishot prompting?
+
+Multishot (also called few-shot) prompting means showing the model several worked examples of
+the task before asking it to do the real one. Each example is a `user` message followed by the
+ideal `assistant` reply. The model sees them as earlier turns in the same conversation and
+continues in the same style.
+
+Compare the two approaches:
+
+- **Zero-shot** sends only the system prompt. The model has to infer what "brief" or
+  "friendly" means for your use case, and will do so slightly differently each time.
+- **Multishot** sends the system prompt plus examples. The model pattern-matches on concrete
+  demonstrations: the length, the structure, the vocabulary, the way edge cases are handled.
+  Output becomes far more consistent, especially for format-sensitive tasks.
+
+Every provider supported by LiteLLM understands this because the examples are ordinary chat
+messages. No provider-specific feature is involved.
+
+### How the template sends it
+
+`PromptProfile.to_messages()` flattens a profile into a message prefix, and
+`build_messages()` appends the live conversation after it:
 
 ```
 system:    <system prompt>
-user:      My widget won't turn on.
-assistant: Sorry to hear that. ...
-user:      Do you ship to Canada?
-assistant: Yes, shipping to Canada ...
---- live conversation follows ---
-user:      <history turn 1>
-assistant: <history turn 1 reply>
-user:      <new message>
+user:      My widget won't turn on.                ┐
+assistant: Sorry to hear that. ...                 │ examples from the profile
+user:      Do you ship to Canada?                  │ (sent on every request)
+assistant: Yes, shipping to Canada ...             ┘
+user:      <history turn 1>                        ┐
+assistant: <history turn 1 reply>                  │ real conversation
+user:      <new message>                           ┘
 ```
 
-The model sees the examples as prior turns of the same conversation, which is the standard
-way to few-shot a chat model across all providers.
+The examples are invisible in the UI. The user only sees the real conversation.
+
+### How to leverage multishot prompting
+
+**Enforce an output format.** If every answer should be a table, a JSON object, or a
+three-bullet summary, show two or three examples of exactly that shape. Models follow a
+demonstrated format much more reliably than a described one.
+
+```yaml
+examples:
+  - user: Summarise: The meeting covered Q3 revenue, which rose 12%, and the hiring freeze.
+    assistant: |
+      - Q3 revenue up 12%
+      - Hiring freeze remains in place
+  - user: Summarise: Launch slipped to May; marketing budget approved.
+    assistant: |
+      - Launch date moved to May
+      - Marketing budget approved
+```
+
+**Calibrate length and tone.** A single "be concise" instruction is vague. Two short example
+replies make the target length unmistakable.
+
+**Teach domain vocabulary.** Show how your product names, ticket IDs, or internal terms should
+be written and used.
+
+**Demonstrate edge cases.** The most valuable examples are the ones instructions handle
+poorly: an off-topic request, a question with missing information, a request the assistant
+must refuse. Show the ideal response to each.
+
+```yaml
+  - user: Can you write my essay for school?
+    assistant: I can't write it for you, but I can help you outline it or review a draft. Which would you like?
+  - user: How much is shipping?
+    assistant: Happy to check. Which country are you shipping to?
+```
+
+**Cover variety, not repetition.** Three examples that each show a different situation
+teach more than five that show the same one.
+
+**Keep the system prompt and examples consistent.** If the system prompt says "never use
+emoji" and an example reply contains one, the model will follow the example.
+
+### Practical limits
+
+- **Token cost.** Examples are sent on every request and count toward input tokens (visible
+  in the header counter). Three to five short examples is usually the sweet spot. Long
+  examples multiply cost across every turn of every conversation.
+- **Context window.** Examples plus conversation history must fit the model's context. For
+  very long chats, trim examples or summarise history.
+- **Ordering matters a little.** Models weight the last examples slightly more. Put the most
+  representative example last.
+- **Examples are not a substitute for rules.** Put hard constraints in the system prompt.
+  Use examples to show what following those rules looks like.
 
 ### Adding a profile
 
-1. Create `prompts/<name>.yaml` with `system` (required), `name` and `examples` (optional).
-2. Restart the app. The new profile appears in the **Prompt profile** dropdown.
-3. Optionally set `PROMPT_PROFILE=<name>` in `.env` to make it the default.
+1. Create `prompts/<name>.yaml` with a `system` block and, optionally, `examples`.
+2. Restart the app so the new file appears in the **Prompt profile** dropdown.
+3. Select it in the Settings accordion, or set `PROMPT_PROFILE=<name>` in `.env` to make it
+   the default.
 
-Tips:
+Two profiles ship with the template: `default` (concise assistant) and `pirate` (same
+accuracy, pirate voice). The pirate profile is a quick way to confirm that the examples are
+reaching the model: ask any question and the reply should be in character.
 
-- Keep examples short and representative. Three to five is usually enough.
-- Examples count against the context window on every request. Trim them for long chats.
-- Use `|` block scalars in YAML for multi-line text to preserve newlines.
+### Testing a profile without the UI
+
+```bash
+uv run python -c "
+from chatbot.prompts import load_profile
+for m in load_profile('default').to_messages():
+    print(m['role'].upper(), '->', m['content'][:80])
+"
+```
+
+This prints the exact message prefix the model will receive.
 
 ## Streaming
 
