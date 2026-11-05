@@ -15,6 +15,7 @@ system prompt with multishot (few-shot) examples.
 - [Switching models](#switching-models)
 - [Prompt profiles and multishot prompting](#prompt-profiles-and-multishot-prompting)
 - [Streaming](#streaming)
+- [Token and cost tracking](#token-and-cost-tracking)
 - [Project layout](#project-layout)
 - [Development workflow](#development-workflow)
 - [Extending the template](#extending-the-template)
@@ -84,7 +85,9 @@ system prompt with multishot (few-shot) examples.
    `delta.content` chunk as it arrives.
 5. `respond()` accumulates the chunks and yields the growing string. Gradio re-renders the
    assistant message on each yield.
-6. If the provider raises, the error is rendered inside the chat bubble rather than crashing
+6. Once the stream ends, token usage and cost are computed and added to the session totals
+   shown in the header.
+7. If the provider raises, the error is rendered inside the chat bubble rather than crashing
    the request.
 
 ## Quick start
@@ -211,6 +214,18 @@ Streaming works end to end without any buffering layer:
 streaming path with no network and no key. It is also the place to pass provider-specific
 options.
 
+## Token and cost tracking
+
+The header shows running totals for the current browser session: input tokens, output tokens,
+and total cost in USD.
+
+- After each streamed reply, `llm.py` rebuilds the response with `litellm.stream_chunk_builder`
+  to read exact token usage. Providers that support it (OpenAI, Anthropic, ...) report usage
+  in the stream; otherwise LiteLLM counts tokens locally.
+- Cost comes from `litellm.completion_cost`, which uses LiteLLM's built-in price table. Local
+  or unpriced models (for example Ollama) show `$0.0000`.
+- Totals live in a `gr.State`, so each browser tab has its own counter. They reset on reload.
+
 ## Project layout
 
 ```
@@ -272,5 +287,6 @@ Tests never hit a real provider. `tests/test_llm.py` passes `mock_response` thro
 | `BadRequestError: LLM Provider NOT provided` | `LLM_MODEL` lacks the `provider/` prefix | Use `anthropic/...`, `openai/...`, etc. |
 | Connection refused with Ollama | Server not running or wrong base URL | Start `ollama serve`; set `LLM_API_BASE=http://localhost:11434`. |
 | `TypeError: ChatInterface.__init__() got an unexpected keyword argument 'type'` | Code written for Gradio 5 running on Gradio 6 | Gradio 6 uses message-format history by default; remove `type="messages"`. |
+| `Cannot find a function with api_name: /chat` when using `gradio_client` | Gradio 6 names the endpoint after the function | Use `api_name="/respond"`. |
 | Profile missing from dropdown | File not in `prompts/` or wrong extension | Use `.yaml` and restart the app. |
 | Reply cut off | `LLM_MAX_TOKENS` too low | Raise it in `.env` or per request. |
